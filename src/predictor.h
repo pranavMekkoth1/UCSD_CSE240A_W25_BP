@@ -38,6 +38,10 @@ extern const char *bpName[];
 #define WT 2 // predict T, weak taken
 #define ST 3 // predict T, strong taken
 
+//Definition for the Choice predictor states
+#define choose_global 0
+#define choose_local 1
+
 //------------------------------------//
 //      Predictor Configuration       //
 //------------------------------------//
