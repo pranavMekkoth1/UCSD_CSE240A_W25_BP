@@ -9,6 +9,9 @@
 #include <math.h>
 #include "predictor.h"
 #include <string.h>
+#include <cstdint>
+#include <iostream>
+#include <bitset>
 
 //
 // TODO:Student Information
@@ -31,16 +34,16 @@ int bpType;            // Branch Prediction Type
 int verbose;
 
 //tournament predictor variables (will need to figure out the propper widths for these)
-int LocalHist_Bits=13;
-int LocalPred_Bits=13;
-int GlobalPred_Bits=15;
-int ChooserBits=15;
+int LocalHist_Bits=11;
+int LocalPred_Bits=15;
+int GlobalPred_Bits=16;
+int ChooserBits=12;
 
-//below are the original values for tournament predictor:
-//int LocalHist_Bits=13;
-//int LocalPred_Bits=13;
-//int GlobalPred_Bits=15;
-//int ChooserBits=15;
+//current optimal values:
+//int LocalHist_Bits=12;
+//int LocalPred_Bits=15;
+//int GlobalPred_Bits=16;
+//int ChooserBits=11;
 
 //custom predictor variables
 int BimodalBits=13; //need 13 bits for 8192 entries
@@ -63,11 +66,11 @@ uint8_t *bht_gshare; //this is the branch history table for gshare (pointer to i
 uint64_t ghistory; //this is the global history register for gshare
 
 //tournament predictor: Alpha 21264
-uint16_t *LocalHistTable; //pointer to the local predictor 1 (10 bit local history)
-uint8_t *LocalPredictTable; //pointer to the local predictor 2 (2 bit saturation counter per entry)
-uint8_t *GlobalPredict; //pointer to the global predictor (2 bit saturation counter per entry)
-uint8_t *Chooser; //pointer to the chooser predictor
-uint64_t ghistory_tournament; //global history register for tournament predictor
+uint16_t *LocalHistTable; //pointer to the local predictor 1 (15 bit wide local history) (2^12 entries)
+uint8_t *LocalPredictTable; //pointer to the local predictor 2 (2 bit saturation counter per entry) (2^15 entries)
+uint8_t *GlobalPredict; //pointer to the global predictor (2 bit saturation counter per entry) (2^15 entries)
+uint8_t *Chooser; //pointer to the chooser predictor (15 bits for 2^15 entries)
+uint32_t ghistory_tournament; //global history register for tournament predictor (16 bits wide)
 
 
 //custom predictor: Tage branch predictor
@@ -77,7 +80,7 @@ typedef struct{//this is the tage table entry
 
   uint64_t tag; //tag for the entry (6-14 bit)
   uint8_t saturating_counter; //saturating counter for the entry (2-bit)
-  uint8_t use_counter; //useful counter (4-bit)
+  uint8_t use_counter; //useful counter (2-bit)
 
 } tageEntry;
 
@@ -185,7 +188,7 @@ void init_tournament(){
   LocalPredictTable=(uint8_t*)malloc(localPred_entries*sizeof(uint8_t)); //allocate memory for the local predictor
   GlobalPredict=(uint8_t*)malloc(globalPred_entries*sizeof(uint8_t)); //allocate memory for the global predictor
   Chooser=(uint8_t*)malloc(chooser_entries*sizeof(uint8_t)); //allocate memory for the chooser predictor
-
+  
   int i=0; 
   for(i=0;i<localHist_entries;i++){ //iterate through the local history table
     LocalHistTable[i]= 0; //initialize all entries to weakly not taken
@@ -198,26 +201,28 @@ void init_tournament(){
     GlobalPredict[j]=WN; //initialize all entries to weakly not taken
   }
   for(j=0;j<chooser_entries;j++){//iterate through the chooser predictor
-    Chooser[i]=choose_global; //initialize all entries to choosing the global predictor initially
+    Chooser[j]=global_weak; //initialize all entries to choosing the global predictor initially
   }
   ghistory_tournament=0; //initialize the global history register to 0
 }
 
 uint8_t tournament_predict(uint32_t pc){
   uint32_t localHist_entries= 1 << LocalHist_Bits; //get the number of entries in the local history table (10 bits wide or 2^13=8192 entries)
-  uint32_t localPred_entries= 1 << LocalPred_Bits; //get the number of entries in the local predictor table (2 bits wide or 2^12=8192 entries)
+  uint32_t localPred_entries= 1 << LocalPred_Bits; //get the number of entries in the local predictor table (2 bits wide or 2^13=8192 entries)
   uint32_t globalPred_entries= 1 << GlobalPred_Bits; //get the number of entries in the global predictor(15 bits wide or 2^15=32768 entries)
   uint32_t chooser_entries= 1 << ChooserBits; //get the number of entries in the chooser predictor(15 bits wide or 2^15=32768 entries)
  
-  uint32_t pc_lower_bits=pc&(localHist_entries-1); //get the lower bits of the pc (pc_lower_bits is : 0-4095)
-  uint32_t globalhistReg_bits=ghistory_tournament&(globalPred_entries-1); //get the lower bits of the global history register (globalhistReg_bits is : 0-32767)
+  uint32_t pc_lower_bits=pc & (localHist_entries-1); //get the lower bits of the pc (pc_lower_bits is : 0-4095)
+  uint32_t ghistory_lower_bits= ghistory_tournament & (globalPred_entries -1); //get the lower bits of the global history register (globalhistReg_bits is : 0-32767)
   
-  int indexLP1=pc_lower_bits & (localHist_entries-1); //get the index for the local history table
+  uint32_t globalhistReg_bits= (ghistory_tournament ^ pc) & (globalPred_entries -1); //gshare based xor operation
+ 
+  int indexLP1=pc_lower_bits ; //get the index for the local history table
   int indexLP2=LocalHistTable[indexLP1] & (localPred_entries-1); //get the index for the local predictor 2
-  int indexGP= globalhistReg_bits & (GlobalPred_Bits-1); //get the index for the global predictor
-  int indexChooser=globalhistReg_bits & (chooser_entries-1); //get the index for the chooser predictor
-
-  if(Chooser[indexChooser]==choose_global){ //if the chooser index we are pointing to says to choose global, look at global predictor entry
+  int indexGP= globalhistReg_bits; //get the index for the global predictor
+  int indexChooser= ghistory_tournament & (chooser_entries -1); //get the index for the chooser predictor by directly taking the ghr value
+  
+  if(Chooser[indexChooser]==global_strong || Chooser[indexChooser]==global_weak){ //if the chooser index we are pointing to says to choose global, look at global predictor entry
     switch(GlobalPredict[indexGP]){ //look at the global predictor entry 
       case SN://if strongly not taken
         return NOTTAKEN;
@@ -229,7 +234,7 @@ uint8_t tournament_predict(uint32_t pc){
         return TAKEN;
     }
   }
-  else if(Chooser[indexChooser]==choose_local){ //if the chooser index we are pointing to says to choose local, look at local predictor entry
+  else if(Chooser[indexChooser] == local_strong || Chooser[indexChooser] == local_weak) { //if the chooser index we are pointing to says to choose local, look at local predictor entry
     switch(LocalPredictTable[indexLP2]){
       case SN://if strongly not taken
         return NOTTAKEN;
@@ -244,7 +249,6 @@ uint8_t tournament_predict(uint32_t pc){
   return NOTTAKEN;
 }
 
-
 void train_tournament(uint32_t pc, uint8_t outcome){
   int localHist_entries= 1 << LocalHist_Bits; //get the number of entries in the local history table (10 bits wide or 2^13=8192 entries)
   int localPred_entries= 1 << LocalPred_Bits; //get the number of entries in the local predictor table (2 bits wide or 2^12=8192 entries)
@@ -252,365 +256,92 @@ void train_tournament(uint32_t pc, uint8_t outcome){
   int chooser_entries= 1 << ChooserBits; //get the number of entries in the chooser predictor(15 bits wide or 2^15=32768 entries)
 
   uint32_t pc_lower_bits=pc&(localHist_entries-1); //get the lower bits of the pc (pc_lower_bits is : 0-4095)
-  uint32_t globalhistReg_bits=ghistory_tournament&(globalPred_entries-1); //get the lower bits of the global history register (globalhistReg_bits is : 0-32767)
+  uint32_t ghistory_lower_bits= ghistory_tournament & (globalPred_entries -1); //get the lower bits of the global history register (globalhistReg_bits is : 0-32767)
   
-  int indexLP1=pc_lower_bits & (localHist_entries-1); //get the index for the local predictor 1
+  uint32_t globalhistReg_bits=(ghistory_tournament ^ pc) & (globalPred_entries - 1); // Gshare-based XOR operation
+  //ghistory_tournament&(globalPred_entries-1); //get the lower bits of the global history register (globalhistReg_bits is : 0-32767)
+  
+  int indexLP1=pc_lower_bits ; //get the index for the local predictor 1
   int indexLP2=LocalHistTable[indexLP1] & (localPred_entries-1); //get the index for the local predictor 2
-  int indexGP= globalhistReg_bits & (GlobalPred_Bits-1); //get the index for the global predictor
+  int indexGP= globalhistReg_bits ; //get the index for the global predictor
   int indexChooser=globalhistReg_bits & (chooser_entries-1); //get the index for the chooser predictor
 
-  if(Chooser[indexChooser]== choose_global){ //if the chooser chooses global predictor
-    switch(GlobalPredict[indexGP]){
-      case SN: //if strongly not taken
+  //if predictions match for local and global return and do nothing
+  int localPred= LocalPredictTable[indexLP2];
+  int globalPred= GlobalPredict[indexGP];
+  
 
-        GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-        if(GlobalPredict[indexGP]== WN){ //if we made the wrong prediction
-          //no need to change chooser choice since we are are still correctly predicting not taken after update
-        
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(LocalPredictTable[indexLP2]){ //update the local predictor entry based on the outcome
-            case SN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-         
-        }
-        else{ //if GlobalPredict[indexP1]= Strongly not taken that means that the prediction was correct
-          //no need to update chooser because chooser was right
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(LocalPredictTable[indexLP2]){ //update the local predictor entry as well
-            case SN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
+  if(localPred != globalPred){
+    switch(Chooser[indexChooser]){
+      case global_strong:
+        Chooser[indexChooser]= (outcome == globalPred) ? global_strong : global_weak;
         break;
-
-      case WN: //if weakly not taken
-        GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; 
-
-        if(GlobalPredict[indexGP]== WT){//this means that the prediction was incorrect 
-
-          Chooser[indexChooser]=choose_local; //update the chooser to choose local predictor
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(LocalPredictTable[indexLP2]){ //update the local predictor entry based on the outcome
-            case SN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-
-        }
-        else if(GlobalPredict[indexGP]== SN){ //this means our prediction was correct 
-          //no need to update chooser since we were correct
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(LocalPredictTable[indexLP2]){ //update the local predictor entry as well
-            case SN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-
+      case global_weak:
+        Chooser[indexChooser]= (outcome == globalPred) ? global_strong : local_weak;
         break;
-      case WT: //if weakly taken
-        GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; 
-        if(GlobalPredict[indexGP]== ST){ //we made the correct prediction
-          //no need to update chooser
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(LocalPredictTable[indexLP2]){ //update the local predictor entry as well
-            case SN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        else{ //we made the wrong prediction
-          Chooser[indexChooser]=choose_local; //update the chooser to choose local predictor
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(LocalPredictTable[indexLP2]){ //update the local predictor entry based on the outcome
-            case SN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
+      case local_weak:
+        Chooser[indexChooser]= (outcome == globalPred) ? global_weak : local_strong;
         break;
-      case ST: //if strongly taken
-        GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; 
-        if(GlobalPredict[indexGP]== ST){ //correct prediction made
-          //no need to update chooser
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(LocalPredictTable[indexLP2]){ //update the local predictor entry as well
-            case SN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        else if(GlobalPredict[indexGP== WT]){//wrong prediction 
-          //no need to update chooser since we would still be predicting Taken
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(LocalPredictTable[indexLP2]){ //update the local predictor entry as well
-            case SN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-
-        }
+      case local_strong:
+        Chooser[indexChooser]=(outcome == globalPred) ? local_weak : local_strong;
         break;
     }
   }
-  else if(Chooser[indexChooser]== choose_local){
-    switch(LocalPredictTable[indexLP2]){
-      case SN:
-        LocalPredictTable[indexLP2]= (outcome==TAKEN)? WN: SN; 
 
-        if(LocalPredictTable[indexLP2]== SN){ //correct predition
-          //no need to change the chooser entry
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(GlobalPredict[indexGP]){ //update the global predictor entry based on the outcome
-            case SN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        else if(LocalPredictTable[indexLP2]== WN){ //incorrect prediction
-          //no need to update chooser since new prediction still predicts not taken
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(GlobalPredict[indexGP]){ //update the global predictor entry based on the outcome
-            case SN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        break;
-      case WN:
-        LocalPredictTable[indexLP2]= (outcome==TAKEN)? WT: SN; 
-
-        if(LocalPredictTable[indexLP2]== WT){//this is an incorrect prediction
-          Chooser[indexChooser]=choose_global; //update the chooser to choose global predictor
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(GlobalPredict[indexGP]){ //update the global predictor entry based on the outcome
-            case SN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        else if(LocalPredictTable[indexLP2]== SN){ //correct prediction
-            //no need to change the chooser entry
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(GlobalPredict[indexGP]){ //update the global predictor entry based on the outcome
-            case SN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-
-        break;
-      case WT:
-        LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WN; 
-
-        if(LocalPredictTable[indexLP2]== ST){ //we made correct prediction
-          //no need to update chooser
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(GlobalPredict[indexGP]){ //update the global predictor entry based on the outcome
-            case SN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        else{ //we made an incorrect prediction
-          Chooser[indexChooser]=choose_global; //update the chooser to choose global predictor
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(GlobalPredict[indexGP]){ //update the global predictor entry based on the outcome
-            case SN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        break;
-
-      case ST:
-        LocalPredictTable[indexLP2]= (outcome==TAKEN)? ST: WT;
-
-        if(LocalPredictTable[indexLP2]== ST){//correct prediction
-          //no need to change chooser
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(GlobalPredict[indexGP]){ //update the global predictor entry based on the outcome
-            case SN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        else if(LocalPredictTable[indexLP2]== WT){//incorrect prediction
-          //no need to change chooser since we will still be predicting taken
-          ghistory_tournament=((ghistory_tournament<<1)|outcome); //update the global history register by shifting left and adding the outcome
-          LocalHistTable[indexLP1]=((LocalHistTable[indexLP1]<<1)|outcome); //update the local history table entry by shifting left and adding the outcome
-          switch(GlobalPredict[indexGP]){ //update the global predictor entry based on the outcome
-            case SN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WN: SN; //if the outcome is taken, set to weakly not taken, else set to strong not taken
-              break;
-            case WN:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? WT: SN; //if the outcome is taken, set to weakly taken, else set to strong not taken
-              break;
-            case WT:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WN; //if the outcome is taken, set to strong taken, else set to weakly not taken
-              break;
-            case ST:
-              GlobalPredict[indexGP]= (outcome==TAKEN)? ST: WT; //if the outcome is taken, set to strong taken, else set to weakly taken
-              break;
-          }
-        }
-        break;
+  
+  //update local predictor and global predictor
+  if(outcome==TAKEN){
+    if(LocalPredictTable[indexLP2]== ST || LocalPredictTable[indexLP2]== WT){
+      LocalPredictTable[indexLP2]= ST;
+    }
+    else if(LocalPredictTable[indexLP2]== WN){
+      LocalPredictTable[indexLP2]= WT;
+    }
+    else{
+      LocalPredictTable[indexLP2]= WN;
     }
   }
-  //updating the global history register is already done within the case statments
+  else if(outcome==NOTTAKEN){
+    if(LocalPredictTable[indexLP2]== SN || LocalPredictTable[indexLP2]== WN){
+      LocalPredictTable[indexLP2]= SN;
+    }
+    else if(LocalPredictTable[indexLP2]== WT){
+      LocalPredictTable[indexLP2]= WN;
+    }
+    else{
+      LocalPredictTable[indexLP2]= WT;
+    }
+  }
+  //update global predictor
+  if(outcome==TAKEN){
+    if(GlobalPredict[indexGP]== ST || GlobalPredict[indexGP]== WT){
+      GlobalPredict[indexGP]= ST;
+    }
+    else if(GlobalPredict[indexGP]== WN){
+      GlobalPredict[indexGP]= WT;
+    }
+    else{
+      GlobalPredict[indexGP]= WN;
+    }
+  }
+  else if(outcome==NOTTAKEN){
+    if(GlobalPredict[indexGP]== SN || GlobalPredict[indexGP]== WN){
+      GlobalPredict[indexGP]= SN;
+    }
+    else if(GlobalPredict[indexGP]== WT){
+      GlobalPredict[indexGP]= WN;
+    }
+    else{
+      GlobalPredict[indexGP]= WT;
+    }
+  }
+
+  //update ghr
+  //printBinary(ghistory_tournament);
+  ghistory_tournament= ((ghistory_tournament <<1) |outcome);////update the global history register by shifting left and adding the outcome
+  //printBinary(ghistory_tournament);
+  //update the local history table
+  LocalHistTable[indexLP1]= ((LocalHistTable[indexLP1]<< 1) | outcome);
 }
 
 
@@ -676,23 +407,9 @@ void init_custom(){
 }
 
 uint8_t custom_predict(uint32_t pc){
-  int bimodal_index= pc & (1<< BimodalBits)-1; //get the index for the bimodal predictor
-  uint8_t prediction= NOTTAKEN; //initialize prediction to not taken
-  uint8_t bimodal= BimodalTable[bimodal_index]; //get the bimodal prediction
-  switch(bimodal){ //check the bimodal prediction
-    case SN:
-      prediction= NOTTAKEN;
-      break;
-    case WN:
-      prediction= NOTTAKEN;
-      break;
-    case WT:
-      prediction= TAKEN;
-      break;
-    case ST:
-      prediction= TAKEN;
-      break;
-  }
+  int bimodal_index= pc & ((1<< BimodalBits)-1); //get the index for the bimodal predictor
+  //uint8_t prediction= NOTTAKEN; //initialize prediction to not taken
+  uint8_t prediction= BimodalTable[bimodal_index]; //get the bimodal prediction
   
   //now itterate from table with longest history entries to smallest this way we are able to make sure the 
   //history is not parter of a larger pattern before looking at smaller patterns (tage5 to tage1)
@@ -700,48 +417,54 @@ uint8_t custom_predict(uint32_t pc){
   int longestMatchTable=0;//this is the table number that has the longest match, if none match, fall back to Bimodalpredictor
   
   //start at tage table 5 (history length 13)
-  int tage5_index= (pc ^ (ghistory_custom >> (64- 9))) % Tage5Bits; //get the index for the tage5 predictor
+  int tage5_index= (pc ^ (ghistory_custom >> (64- 9))) % (1<< Tage5Bits); //get the index for the tage5 predictor
   if(Tage5Table[tage5_index].tag== (pc & ((1<< Tage5Bits)-1))){ //if the tag matches t
     longestMatchTable=5;//we found a match in this label
     prediction= Tage5Table[tage5_index].saturating_counter; //the saturating counter is the prediction
-    return prediction; //since we found a match in this tage table, no need to teck others
+    //return prediction; //since we found a match in this tage table, no need to teck others
   }
 
   //check table 4 (history length 12)
-  int tage4_index= (pc ^ (ghistory_custom >> (64-10))) % Tage4Bits; //get the index for the tage4 predictor
+  int tage4_index= (pc ^ (ghistory_custom >> (64-10))) % (1<< Tage4Bits); //get the index for the tage4 predictor
   if(Tage4Table[tage4_index].tag== (pc & ((1<< Tage4Bits)-1))){ //if the tag matches
     longestMatchTable=4;//we found a match in this label
     prediction= Tage4Table[tage4_index].saturating_counter; //the saturating counter is the prediction
-    return prediction; //since we found a match in this tage table, no need to teck others
+    //return prediction; //since we found a match in this tage table, no need to teck others
   }
 
   //now check tage 3 table (history length 11)
-  int tage3_index= (pc ^ (ghistory_custom >> (64-11))) % Tage3Bits; //get the index for the tage3 predictor
+  int tage3_index= (pc ^ (ghistory_custom >> (64-11))) % (1<< Tage3Bits); //get the index for the tage3 predictor
   if(Tage3Table[tage3_index].tag== (pc & ((1<< Tage3Bits)-1))){ //if the tag matches
     longestMatchTable=3;//we found a match in this label
     prediction= Tage3Table[tage3_index].saturating_counter; //the saturating counter is the prediction
-    return prediction; //since we found a match in this tage table, no need to teck others
+    //return prediction; //since we found a match in this tage table, no need to teck others
   }
 
   //check table 2 (history length 10)
-  int tage2_index= (pc ^ (ghistory_custom >> (64-12))) % Tage2Bits; //get the index for the tage2 predictor
+  int tage2_index= (pc ^ (ghistory_custom >> (64-12))) % (1<< Tage2Bits); //get the index for the tage2 predictor
   if(Tage2Table[tage2_index].tag== (pc & ((1<< Tage2Bits)-1))){ //if the tag matches
     longestMatchTable=2;//we found a match in this label
     prediction= Tage2Table[tage2_index].saturating_counter; //the saturating counter is the prediction
-    return prediction; //since we found a match in this tage table, no need to teck others
+    //return prediction; //since we found a match in this tage table, no need to teck others
   }
 
   //check table 1 (history length 9)
-  int tage1_index= (pc ^ (ghistory_custom >> (64-13))) % Tage1Bits; //get the index for the tage1 predictor
+  int tage1_index= (pc ^ (ghistory_custom >> (64-13))) % (1<< Tage1Bits); //get the index for the tage1 predictor
   if(Tage1Table[tage1_index].tag== (pc & ((1<< Tage1Bits)-1))){ //if the tag matches
     longestMatchTable=1;//we found a match in this label
     prediction= Tage1Table[tage1_index].saturating_counter; //the saturating counter is the prediction
-    return prediction; //since we found a match in this tage table, no need to teck others
+    //return prediction; //since we found a match in this tage table, no need to teck others
   }
 
 
-  //default to taking the prediction of bimodal predictor if there is no matches in tage tables
-  return prediction; 
+  //return taken or not taken based on the prediction (regardless of match)
+  if(prediction==WN || prediction==SN){
+    return NOTTAKEN;
+  }
+  else{
+    return TAKEN;
+  }
+  //return prediction; 
 }
 
 void train_custom(uint32_t pc, uint8_t outcome){
@@ -802,7 +525,7 @@ void train_custom(uint32_t pc, uint8_t outcome){
     //now itterate through table from smallest history length to largest till we find one with an entry with useful counter=0
     int usefulFound=0;//goes to 1 if we found an entry to fill
     //start at tage table 1 (history length 9)
-    uint32_t indexT1= (pc ^ (ghistory_custom >> (64-13))) % Tage1Bits; //get the index for the tage1 predictor
+    uint32_t indexT1= (pc ^ (ghistory_custom >> (64-13))) % (1<< Tage1Bits); //get the index for the tage1 predictor
     if(Tage1Table[indexT1].use_counter==0){
       //we found an entry with usefullness=0, this means we can replace the entry with a new one based on outcome
       
@@ -838,7 +561,7 @@ void train_custom(uint32_t pc, uint8_t outcome){
     }
     
     //now look at tage table 2 (history length 10)
-    uint32_t indexT2= (pc ^ (ghistory_custom >> (64-12))) % Tage2Bits; //get the index for the tage2 predictor
+    uint32_t indexT2= (pc ^ (ghistory_custom >> (64-12))) % (1<<Tage2Bits); //get the index for the tage2 predictor
     if((Tage2Table[indexT2].use_counter==0) && usefulFound==0){
       //we found an entry with usefullness=0, this means we can replace the entry with a new one based on outcome
       usefulFound=1;
@@ -872,7 +595,7 @@ void train_custom(uint32_t pc, uint8_t outcome){
     }
     
     //now look at tage table 3 (history length 11)
-    uint32_t indexT3= (pc ^ (ghistory_custom >> (64-11))) % Tage3Bits; //get the index for the tage3 predictor
+    uint32_t indexT3= (pc ^ (ghistory_custom >> (64-11))) % (1<<Tage3Bits); //get the index for the tage3 predictor
     if((Tage3Table[indexT3].use_counter==0) && usefulFound==0){
       //we found an entry with usefullness=0, this means we can replace the entry with a new one based on outcome
       usefulFound=1;
@@ -906,7 +629,7 @@ void train_custom(uint32_t pc, uint8_t outcome){
     }
 
     //now look at tage table 4 (history length 12)
-    uint32_t indexT4= (pc ^ (ghistory_custom >> (64-10))) % Tage4Bits; //get the index for the tage4 predictor
+    uint32_t indexT4= (pc ^ (ghistory_custom >> (64-10))) % (1<<Tage4Bits); //get the index for the tage4 predictor
     if((Tage4Table[indexT4].use_counter==0) && usefulFound==0){
       //we found an entry with usefullness=0, this means we can replace the entry with a new one based on outcome
       usefulFound=1;
@@ -940,7 +663,7 @@ void train_custom(uint32_t pc, uint8_t outcome){
     }
   
     //now look at tage table 5 (history length 13)
-    uint32_t indexT5= (pc ^ (ghistory_custom >> (64-9))) % Tage5Bits; //get the index for the tage5 predictor
+    uint32_t indexT5= (pc ^ (ghistory_custom >> (64-9))) % (1<<Tage5Bits); //get the index for the tage5 predictor
     if((Tage5Table[indexT5].use_counter==0) && usefulFound==0){
       //we found an entry with usefullness=0, this means we can replace the entry with a new one based on outcome
       usefulFound=1;
@@ -993,168 +716,65 @@ void train_custom(uint32_t pc, uint8_t outcome){
         break;
     }
     if(outcome== TAKEN){
-      if(longestMatchTable==1){
-        switch(Tage1Table[indexMatch].saturating_counter){
-          case SN:
-            Tage1Table[indexMatch].saturating_counter=WN;
-            break;
-          case WN:
-            Tage1Table[indexMatch].saturating_counter=WT;
-            break;
-          case WT:
-            Tage1Table[indexMatch].saturating_counter=ST;
-            break;
-          case ST:
-            Tage1Table[indexMatch].saturating_counter=ST;
-            break;
-        }
-      }
-      else if(longestMatchTable==2){
-        switch(Tage2Table[indexMatch].saturating_counter){
-          case SN:
-            Tage2Table[indexMatch].saturating_counter=WN;
-            break;
-          case WN:
-            Tage2Table[indexMatch].saturating_counter=WT;
-            break;
-          case WT:
-            Tage2Table[indexMatch].saturating_counter=ST;
-            break;
-          case ST:
-            Tage2Table[indexMatch].saturating_counter=ST;
-            break;
-        }
-      }
-      else if(longestMatchTable==3){
-        switch(Tage3Table[indexMatch].saturating_counter){
-          case SN:
-            Tage3Table[indexMatch].saturating_counter=WN;
-            break;
-          case WN:
-            Tage3Table[indexMatch].saturating_counter=WT;
-            break;
-          case WT:
-            Tage3Table[indexMatch].saturating_counter=ST;
-            break;
-          case ST:
-            Tage3Table[indexMatch].saturating_counter=ST;
-            break;
-        }
-      }
-      else if(longestMatchTable==4){
-        switch(Tage4Table[indexMatch].saturating_counter){
-          case SN:
-            Tage4Table[indexMatch].saturating_counter=WN;
-            break;
-          case WN:
-            Tage4Table[indexMatch].saturating_counter=WT;
-            break;
-          case WT:
-            Tage4Table[indexMatch].saturating_counter=ST;
-            break;
-          case ST:
-            Tage4Table[indexMatch].saturating_counter=ST;
-            break;
-        }
-      }
-      else if(longestMatchTable==5){
-        switch(Tage5Table[indexMatch].saturating_counter){
-          case SN:
-            Tage5Table[indexMatch].saturating_counter=WN;
-            break;
-          case WN:
-            Tage5Table[indexMatch].saturating_counter=WT;
-            break;
-          case WT:
-            Tage5Table[indexMatch].saturating_counter=ST;
-            break;
-          case ST:
-            Tage5Table[indexMatch].saturating_counter=ST;
-            break;
-        }
+      switch(longestMatchTable){
+        case 1:
+          if(Tage1Table[indexMatch].saturating_counter <ST){
+            Tage1Table[indexMatch].saturating_counter ++;
+          }
+          break;
+        case 2:
+          if(Tage2Table[indexMatch].saturating_counter <ST){
+            Tage2Table[indexMatch].saturating_counter ++;
+          }
+          break;
+        case 3:
+          if(Tage3Table[indexMatch].saturating_counter <ST){
+            Tage3Table[indexMatch].saturating_counter ++;
+          }
+          break;
+        case 4:
+          if(Tage4Table[indexMatch].saturating_counter <ST){
+            Tage4Table[indexMatch].saturating_counter ++;
+          }
+          break;
+        case 5:
+          if(Tage5Table[indexMatch].saturating_counter <ST){
+            Tage5Table[indexMatch].saturating_counter ++;
+          }
+          break;
+
       }
     }
     else{ //the outcome is not taken
-      if(longestMatchTable==1){
-        switch(Tage1Table[indexMatch].saturating_counter){
-          case SN:
-            Tage1Table[indexMatch].saturating_counter=SN;
-            break;
-          case WN:
-            Tage1Table[indexMatch].saturating_counter=SN;
-            break;
-          case WT:
-            Tage1Table[indexMatch].saturating_counter=WN;
-            break;
-          case ST:
-            Tage1Table[indexMatch].saturating_counter=WT;
-            break;
-        }
+      switch(longestMatchTable){
+        case 1:
+          if(Tage1Table[indexMatch].saturating_counter <SN){
+            Tage1Table[indexMatch].saturating_counter --;
+          }
+          break;
+        case 2:
+          if(Tage2Table[indexMatch].saturating_counter <SN){
+            Tage2Table[indexMatch].saturating_counter --;
+          }
+          break;
+        case 3:
+          if(Tage3Table[indexMatch].saturating_counter <SN){
+            Tage3Table[indexMatch].saturating_counter --;
+          }
+          break;
+        case 4:
+          if(Tage4Table[indexMatch].saturating_counter <SN){
+            Tage4Table[indexMatch].saturating_counter --;
+          }
+          break;
+        case 5:
+          if(Tage5Table[indexMatch].saturating_counter <SN){
+            Tage5Table[indexMatch].saturating_counter --;
+          }
+          break;
+
       }
-      else if(longestMatchTable==2){
-        switch(Tage2Table[indexMatch].saturating_counter){
-          case SN:
-            Tage2Table[indexMatch].saturating_counter=SN;
-            break;
-          case WN:
-            Tage2Table[indexMatch].saturating_counter=SN;
-            break;
-          case WT:
-            Tage2Table[indexMatch].saturating_counter=WN;
-            break;
-          case ST:
-            Tage2Table[indexMatch].saturating_counter=WT;
-            break;
-        }
-      }
-      else if(longestMatchTable==3){
-        switch(Tage3Table[indexMatch].saturating_counter){
-          case SN:
-            Tage3Table[indexMatch].saturating_counter=SN;
-            break;
-          case WN:
-            Tage3Table[indexMatch].saturating_counter=SN;
-            break;
-          case WT:
-            Tage3Table[indexMatch].saturating_counter=WN;
-            break;
-          case ST:
-            Tage3Table[indexMatch].saturating_counter=WT;
-            break;
-        }
-      }
-      else if(longestMatchTable==4){
-        switch(Tage4Table[indexMatch].saturating_counter){
-          case SN:
-            Tage4Table[indexMatch].saturating_counter=SN;
-            break;
-          case WN:
-            Tage4Table[indexMatch].saturating_counter=SN;
-            break;
-          case WT:
-            Tage4Table[indexMatch].saturating_counter=WN;
-            break;
-          case ST:
-            Tage4Table[indexMatch].saturating_counter=WT;
-            break;
-        }
-      }
-      else if(longestMatchTable==5){
-        switch(Tage5Table[indexMatch].saturating_counter){
-          case SN:
-            Tage5Table[indexMatch].saturating_counter=SN;
-            break;
-          case WN:
-            Tage5Table[indexMatch].saturating_counter=SN;
-            break;
-          case WT:
-            Tage5Table[indexMatch].saturating_counter=WN;
-            break;
-          case ST:
-            Tage5Table[indexMatch].saturating_counter=WT;
-            break;
-        }
-      }
+      
     }
 
   //end by updating the ghr based on the outcome. (No changes ever made to PC)

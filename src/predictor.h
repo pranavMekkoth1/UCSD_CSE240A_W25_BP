@@ -39,8 +39,10 @@ extern const char *bpName[];
 #define ST 3 // predict T, strong taken
 
 //Definition for the Choice predictor states
-#define choose_global 0
-#define choose_local 1
+#define global_strong 0
+#define global_weak 1
+#define local_weak 2
+#define local_strong 3
 
 //------------------------------------//
 //      Predictor Configuration       //
