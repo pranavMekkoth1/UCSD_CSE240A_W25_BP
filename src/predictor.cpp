@@ -39,11 +39,11 @@ int LocalPred_Bits=15;
 int GlobalPred_Bits=16;
 int ChooserBits=12;
 
-//current optimal values:
-//int LocalHist_Bits=12;
+//current optimal values: (achieves 35 overall mispredict rate)
+//int LocalHist_Bits=11;
 //int LocalPred_Bits=15;
 //int GlobalPred_Bits=16;
-//int ChooserBits=11;
+//int ChooserBits=12;
 
 //custom predictor variables
 int BimodalBits=13; //need 13 bits for 8192 entries
@@ -78,9 +78,9 @@ uint8_t *BimodalTable; //pointer to the bimodal predictor (2 bit saturation coun
 
 typedef struct{//this is the tage table entry
 
-  uint64_t tag; //tag for the entry (6-14 bit)
+  uint16_t tag; //tag for the entry (10 bit)
   uint8_t saturating_counter; //saturating counter for the entry (2-bit)
-  uint8_t use_counter; //useful counter (2-bit)
+  uint8_t use_counter; //useful counter (1-bit)
 
 } tageEntry;
 
@@ -89,10 +89,9 @@ tageEntry *Tage2Table; //pointer to the tage predictor 2
 tageEntry *Tage3Table; //pointer to the tage predictor 3 
 tageEntry *Tage4Table; //pointer to the tage predictor 4 
 tageEntry *Tage5Table; //pointer to the tage predictor 5 
-//uint16_t *PartialTag; //pointer to entries in the partial tag table (18 to 16 bit tags per entry)
 
 uint64_t ghistory_custom; //this is the global history register for the custom predictor
-//uint16_t phr_custom; //this is the pattern history register for the custom predictor
+
 
 
 
@@ -270,6 +269,36 @@ void train_tournament(uint32_t pc, uint8_t outcome){
   int localPred= LocalPredictTable[indexLP2];
   int globalPred= GlobalPredict[indexGP];
   
+  
+  switch(GlobalPredict[indexGP]){ //look at the global predictor entry 
+      case SN://if strongly not taken
+        globalPred= NOTTAKEN;
+        break;
+      case WN://if weakly not taken
+        globalPred= NOTTAKEN;
+        break;
+      case WT://if weakly taken
+        globalPred= TAKEN;
+        break;
+      case ST://if strongly taken
+        globalPred= TAKEN;
+        break;
+    }
+    switch(LocalPredictTable[indexLP2]){
+      case SN://if strongly not taken
+        localPred= NOTTAKEN;
+        break;
+      case WN://if weakly not taken
+        localPred= NOTTAKEN;
+        break;
+      case WT://if weakly taken
+        localPred= TAKEN;
+        break;
+      case ST://if strongly taken
+        localPred= TAKEN;
+        break;
+    }
+
 
   if(localPred != globalPred){
     switch(Chooser[indexChooser]){
@@ -344,7 +373,6 @@ void train_tournament(uint32_t pc, uint8_t outcome){
   LocalHistTable[indexLP1]= ((LocalHistTable[indexLP1]<< 1) | outcome);
 }
 
-
 void cleanup_tournament(){
   //free all the data structures for the tournament predictor
   free(LocalHistTable);
@@ -418,7 +446,7 @@ uint8_t custom_predict(uint32_t pc){
   
   //start at tage table 5 (history length 13)
   int tage5_index= (pc ^ (ghistory_custom >> (64- 9))) % (1<< Tage5Bits); //get the index for the tage5 predictor
-  if(Tage5Table[tage5_index].tag== (pc & ((1<< Tage5Bits)-1))){ //if the tag matches t
+  if((Tage5Table[tage5_index].tag== (pc & ((1<< Tage5Bits)-1))) && longestMatchTable==0){ //if the tag matches t
     longestMatchTable=5;//we found a match in this label
     prediction= Tage5Table[tage5_index].saturating_counter; //the saturating counter is the prediction
     //return prediction; //since we found a match in this tage table, no need to teck others
@@ -426,7 +454,7 @@ uint8_t custom_predict(uint32_t pc){
 
   //check table 4 (history length 12)
   int tage4_index= (pc ^ (ghistory_custom >> (64-10))) % (1<< Tage4Bits); //get the index for the tage4 predictor
-  if(Tage4Table[tage4_index].tag== (pc & ((1<< Tage4Bits)-1))){ //if the tag matches
+  if((Tage4Table[tage4_index].tag== (pc & ((1<< Tage4Bits)-1)))&& longestMatchTable==0){ //if the tag matches
     longestMatchTable=4;//we found a match in this label
     prediction= Tage4Table[tage4_index].saturating_counter; //the saturating counter is the prediction
     //return prediction; //since we found a match in this tage table, no need to teck others
@@ -434,7 +462,7 @@ uint8_t custom_predict(uint32_t pc){
 
   //now check tage 3 table (history length 11)
   int tage3_index= (pc ^ (ghistory_custom >> (64-11))) % (1<< Tage3Bits); //get the index for the tage3 predictor
-  if(Tage3Table[tage3_index].tag== (pc & ((1<< Tage3Bits)-1))){ //if the tag matches
+  if((Tage3Table[tage3_index].tag== (pc & ((1<< Tage3Bits)-1))) && longestMatchTable==0){ //if the tag matches
     longestMatchTable=3;//we found a match in this label
     prediction= Tage3Table[tage3_index].saturating_counter; //the saturating counter is the prediction
     //return prediction; //since we found a match in this tage table, no need to teck others
@@ -442,7 +470,7 @@ uint8_t custom_predict(uint32_t pc){
 
   //check table 2 (history length 10)
   int tage2_index= (pc ^ (ghistory_custom >> (64-12))) % (1<< Tage2Bits); //get the index for the tage2 predictor
-  if(Tage2Table[tage2_index].tag== (pc & ((1<< Tage2Bits)-1))){ //if the tag matches
+  if((Tage2Table[tage2_index].tag== (pc & ((1<< Tage2Bits)-1)))&& longestMatchTable==0){ //if the tag matches
     longestMatchTable=2;//we found a match in this label
     prediction= Tage2Table[tage2_index].saturating_counter; //the saturating counter is the prediction
     //return prediction; //since we found a match in this tage table, no need to teck others
@@ -450,7 +478,7 @@ uint8_t custom_predict(uint32_t pc){
 
   //check table 1 (history length 9)
   int tage1_index= (pc ^ (ghistory_custom >> (64-13))) % (1<< Tage1Bits); //get the index for the tage1 predictor
-  if(Tage1Table[tage1_index].tag== (pc & ((1<< Tage1Bits)-1))){ //if the tag matches
+  if((Tage1Table[tage1_index].tag== (pc & ((1<< Tage1Bits)-1))) && longestMatchTable==0){ //if the tag matches
     longestMatchTable=1;//we found a match in this label
     prediction= Tage1Table[tage1_index].saturating_counter; //the saturating counter is the prediction
     //return prediction; //since we found a match in this tage table, no need to teck others
@@ -475,31 +503,31 @@ void train_custom(uint32_t pc, uint8_t outcome){
     //this is because we want to follow the same method to find the tage table with longest matching entry
     //if non, we fall back on bimodal
   //start at tage table 5 (history length 13)
-  int tage5_index= (pc ^ (ghistory_custom >> (64- 9))) % Tage5Bits; //get the index for the tage5 predictor
+  int tage5_index= (pc ^ (ghistory_custom >> (64- 9))) % (1<<Tage5Bits); //get the index for the tage5 predictor
   if(Tage5Table[tage5_index].tag== (pc & ((1<< Tage5Bits)-1))){ //if the tag matches t
     longestMatchTable=5;//we found a match in this label
   }
 
   //check table 4 (history length 12)
-  int tage4_index= (pc ^ (ghistory_custom >> (64-10))) % Tage4Bits; //get the index for the tage4 predictor
+  int tage4_index= (pc ^ (ghistory_custom >> (64-10))) % (1<<Tage4Bits); //get the index for the tage4 predictor
   if((Tage4Table[tage4_index].tag== (pc & ((1<< Tage4Bits)-1))) && longestMatchTable==0){ //if the tag matches/ no previous match
     longestMatchTable=4;//we found a match in this label
   }
 
   //now check tage 3 table (history length 11)
-  int tage3_index= (pc ^ (ghistory_custom >> (64-11))) % Tage3Bits; //get the index for the tage3 predictor
+  int tage3_index= (pc ^ (ghistory_custom >> (64-11))) % (1<<Tage3Bits); //get the index for the tage3 predictor
   if((Tage3Table[tage3_index].tag== (pc & ((1<< Tage3Bits)-1))) && longestMatchTable==0 ){ //if the tag matches
     longestMatchTable=3;//we found a match in this label
   }
 
   //check table 2 (history length 10)
-  int tage2_index= (pc ^ (ghistory_custom >> (64-12))) % Tage2Bits; //get the index for the tage2 predictor
+  int tage2_index= (pc ^ (ghistory_custom >> (64-12))) % (1<<Tage2Bits); //get the index for the tage2 predictor
   if((Tage2Table[tage2_index].tag== (pc & ((1<< Tage2Bits)-1))) && longestMatchTable==0){ //if the tag matches
     longestMatchTable=2;//we found a match in this label
   }
 
   //check table 1 (history length 9)
-  int tage1_index= (pc ^ (ghistory_custom >> (64-13))) % Tage1Bits; //get the index for the tage1 predictor
+  int tage1_index= (pc ^ (ghistory_custom >> (64-13))) % (1<<Tage1Bits); //get the index for the tage1 predictor
   if((Tage1Table[tage1_index].tag== (pc & ((1<< Tage1Bits)-1))) && longestMatchTable==0){ //if the tag matches
     longestMatchTable=1;//we found a match in this label
   }
